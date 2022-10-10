@@ -4,24 +4,24 @@ members = [
     "core/macros",
     "core/build_playerglobal",
     "desktop",
-    "swf",
-    "web",
-    "web/packages/extension/safari",
-    "wstr",
-    "scanner",
-    "exporter",
+#    "swf",
+#    "web",
+#    "web/packages/extension/safari",
+#    "wstr",
+#    "scanner",
+#    "exporter",
 
     "render",
-    "render/canvas",
+#    "render/canvas",
     "render/naga-agal",
-    "render/wgpu",
-    "render/webgl",
+#    "render/wgpu",
+#    "render/webgl",
 
-    "video",
-    "video/software",
+#    "video",
+#    "video/software",
 
-    "tests",
-    "tests/input-format",
+#    "tests",
+#    "tests/input-format",
 ]
 resolver = "2"
 
