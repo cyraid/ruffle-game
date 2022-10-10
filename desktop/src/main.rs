@@ -5,6 +5,8 @@
 // See https://docs.microsoft.com/en-us/cpp/build/reference/subsystem?view=msvc-160 for details.
 #![windows_subsystem = "windows"]
 
+mod gamepad;
+mod external;
 mod audio;
 mod custom_event;
 mod executor;
@@ -13,12 +15,14 @@ mod storage;
 mod task;
 mod ui;
 
+use gamepad::Gamepad;
+use external::GameExternalInterfaceProvider;
+
 use crate::custom_event::RuffleEvent;
 use crate::executor::GlutinAsyncExecutor;
 use anyhow::{anyhow, Context, Error};
 use clap::Parser;
 use isahc::{config::RedirectPolicy, prelude::*, HttpClient};
-use rfd::FileDialog;
 use ruffle_core::{
     config::Letterbox, events::KeyCode, tag_utils::SwfMovie, Player, PlayerBuilder, PlayerEvent,
     StageDisplayState, StaticCallstack, ViewportDimensions,
@@ -29,15 +33,20 @@ use std::cell::RefCell;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::slice;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use url::Url;
+use winapi::shared::ntdef::LPWSTR;
+use winapi::um::libloaderapi::{FindResourceW, FreeResource, GetModuleHandleW, LoadResource, LoadStringW, LockResource, SizeofResource};
+use winapi::um::winuser::{MAKEINTRESOURCEW, RT_RCDATA};
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::event::{
     ElementState, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, VirtualKeyCode,
     WindowEvent,
 };
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopBuilder};
+use winit::platform::windows::IconExtWindows;
 use winit::window::{Fullscreen, Icon, Window, WindowBuilder};
 
 thread_local! {
@@ -141,18 +150,28 @@ fn parse_parameters(opt: &Opt) -> impl '_ + Iterator<Item = (String, String)> {
     })
 }
 
-fn pick_file() -> Option<PathBuf> {
-    FileDialog::new()
-        .add_filter(".swf", &["swf"])
-        .set_title("Load a Flash File")
-        .pick_file()
-}
-
 fn load_movie(url: &Url, opt: &Opt) -> Result<SwfMovie, Error> {
     let mut movie = if url.scheme() == "file" {
         SwfMovie::from_path(url.to_file_path().unwrap(), None)
             .map_err(|e| anyhow!(e.to_string()))
             .context("Couldn't load swf")?
+    } else if url.scheme() == "res" {
+
+        let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+        let res_info = unsafe { FindResourceW(instance, MAKEINTRESOURCEW(0x200), RT_RCDATA) };
+        let data_size = unsafe { SizeofResource(instance, res_info) };
+        let res = unsafe { LoadResource(instance, res_info) };
+        let data_ptr = unsafe { LockResource(res) as *const u8 };
+        let buffer = unsafe { slice::from_raw_parts(data_ptr, data_size as usize) };
+
+        unsafe {
+            FreeResource(res);
+        }
+
+        SwfMovie::from_data(&buffer, Some(url.to_string()), None)
+            .map_err(|e| anyhow!(e.to_string()))
+            .context("Couldn't load swf")?
+
     } else {
         let proxy = opt.proxy.as_ref().and_then(|url| url.as_str().parse().ok());
         let builder = HttpClient::builder()
@@ -190,7 +209,7 @@ impl App {
     fn new(opt: Opt) -> Result<Self, Error> {
         let path = match opt.input_path.as_ref() {
             Some(path) => Some(std::borrow::Cow::Borrowed(path)),
-            None => pick_file().map(std::borrow::Cow::Owned),
+            None => Some(std::borrow::Cow::Owned(PathBuf::from("res://SWFBLOB"))),
         };
         let movie_url = if let Some(path) = path {
             Some(parse_url(&path).context("Couldn't load specified path")?)
@@ -199,21 +218,21 @@ impl App {
             std::process::exit(0);
         };
 
-        let icon_bytes = include_bytes!("../assets/favicon-32.rgba");
-        let icon =
-            Icon::from_rgba(icon_bytes.to_vec(), 32, 32).context("Couldn't load app icon")?;
-
+        let icon = Icon::from_resource(0x101, None).context("Couldn't load app icon")?;
         let event_loop = EventLoopBuilder::with_user_event().build();
 
-        let title = if let Some(movie_url) = &movie_url {
-            let filename = movie_url
-                .path_segments()
-                .and_then(|segments| segments.last())
-                .unwrap_or_else(|| movie_url.as_str());
+        let title = {
 
-            format!("Ruffle - {}", filename)
-        } else {
-            "Ruffle".into()
+            let mut buf: [u16; 1024] = [0; 1024];
+            let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+            let str_size = unsafe { LoadStringW(instance, 0x201, buf.as_mut_ptr() as LPWSTR, 1024) };
+
+            if str_size <= 0 {
+                String::from("Game")
+            } else {
+                String::from_utf16_lossy(&buf[0..str_size as usize])
+            }
+
         };
 
         let window = WindowBuilder::new()
@@ -273,18 +292,15 @@ impl App {
 
         if let Some(movie_url) = movie_url {
             let event_loop_proxy = event_loop.create_proxy();
-            let on_metadata = move |swf_header: &ruffle_core::swf::HeaderExt| {
-                let _ = event_loop_proxy.send_event(RuffleEvent::OnMetadata(swf_header.clone()));
-            };
+            let movie = load_movie(&movie_url, &opt).unwrap();
+            let _ = event_loop_proxy.send_event(RuffleEvent::OnMetadata(movie.header().clone()));
+            let mut player_lock = player.lock().unwrap();
 
-            player.lock().unwrap().fetch_root_movie(
-                movie_url.to_string(),
-                parse_parameters(&opt).collect(),
-                Box::new(on_metadata),
-            );
+            player_lock.add_external_interface(Box::new(GameExternalInterfaceProvider::new()));
+            player_lock.set_root_movie(movie);
 
             CALLSTACK.with(|callstack| {
-                *callstack.borrow_mut() = Some(player.lock().unwrap().callstack());
+                *callstack.borrow_mut() = Some(player_lock.callstack());
             })
         }
 
@@ -298,6 +314,7 @@ impl App {
     }
 
     fn run(self) -> ! {
+        let mut gamepad = Gamepad::new();
         let mut loaded = false;
         let mut mouse_pos = PhysicalPosition::new(0.0, 0.0);
         let mut time = Instant::now();
@@ -308,6 +325,10 @@ impl App {
         // Poll UI events.
         self.event_loop
             .run(move |event, _window_target, control_flow| {
+
+                // Handle Gamepad Input
+                gamepad.handle_gamepad_input(&self.player);
+
                 // Handle fullscreen keyboard shortcuts: Alt+Return, Escape.
                 if let winit::event::Event::WindowEvent {
                     event: WindowEvent::KeyboardInput { input, .. },
