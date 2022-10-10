@@ -1,7 +1,7 @@
 # Ruffle Game
 
 This 'game version' is meant to make it easier for Game Developers wanting to have gamepad / platform support (eg. Steam).
-If no exe is provided on the command-line, Ruffle Game will play the embedded SWF resource in the exe.
+If no SWF is provided on the command-line, Ruffle Game will play the embedded SWF resource in the exe.
 
 Please see the [Companion App](https://github.com/cyraid/rgcompanion) to replace the embedded SWF,
 Icon, and Title.
